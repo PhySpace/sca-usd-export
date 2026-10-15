@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sca-usd-export"
+version = "0.1.0"
+description = "Independent SimpleCADAPI product-package to OpenUSD add-on"
+readme = "README.zh-CN.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+dependencies = [
+    "simplecadapi>=2.2.4,<2.2.5",
+    "usd-core==26.8",
+    "numpy==2.3.1",
+    "cadquery-ocp==7.9.3.1",
+    "plotly==7.1.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+sca-usd-export = "sca_usd_export.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sca_usd_export"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"

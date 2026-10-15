@@ -1,0 +1,14 @@
+[addon]
+name = "sca-usd-export"
+version = "0.1.0"
+license = "Apache-2.0"
+skill_path = "skill"
+
+[compat]
+sca = ">=2.2.4,<2.2.5"
+
+[runtime]
+kind = "python-env"
+platforms = ["windows-x86_64"]
+command_prefix = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command .('{addon_dir}/scripts/dispatch.ps1') -RuntimeDir '{runtime_dir}'"
+check_cmd = "check"

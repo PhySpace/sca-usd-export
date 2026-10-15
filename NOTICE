@@ -1,0 +1,20 @@
+sca-usd-export 0.1.0
+
+This add-on adapts the OpenUSD export implementation originally developed
+under extensions/usd_export/ in the SimpleCADAPI project:
+https://github.com/PhySpace/SimpleCADAPI
+
+SimpleCADAPI is distributed under the Apache License, Version 2.0.
+The upstream license text is retained in LICENSE. This distribution adds
+independent Python packaging, SCA add-on metadata, isolated runtime setup,
+Windows argument transport, and add-on usage documentation.
+
+Only the export extension implementation is reused. No SimpleCADAPI core
+source code is copied or vendored into this repository. SimpleCADAPI and
+its geometry kernel are runtime dependencies installed into the add-on's
+separate environment; they retain their own notices and licenses.
+The separately installed cadquery-ocp dependency is pinned to 7.9.3.1 to
+match the original exporter's kernel baseline; it is not bundled here.
+
+OpenUSD and other third-party dependencies retain their respective
+licenses and notices. This add-on does not include or validate Isaac Sim.
