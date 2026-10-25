@@ -1,5 +1,7 @@
 # sca-usd-export
 
+从 [v0.1.8rc2 Pre-release](https://github.com/PhySpace/sca-usd-export/releases/tag/v0.1.8rc2) 下载 **`sca-usd-export-0.1.8rc2.zip`** 与 **`SHA256SUMS.txt`**；自动 **Source code** 附件是源码快照。按[公开下载与安装步骤](docs/release-installation.zh-CN.md)校验、解压，再用 SCA 安装解压目录，不直接安装ZIP。源码继续维护在`main`。配套 [physics v0.1.8rc1](https://github.com/wwlloo/sca-physics/releases/tag/v0.1.8rc1)。rc不是稳定版，实际下载验收结果见Release正文。
+
 这是独立的 SimpleCADAPI add-on：读取已完成的 `.scadpkg`，逐零件生成 OpenUSD，并保留结构、物理描述和建模历史。
 USD 输入直接来自产品包中的 BREP、定义和实例数据，不经过 STL。
 当前维护候选版本为 **0.1.8rc2**；无物理配置的产品包可独立导出。读取包内 `metadata.sca_physics` 或准备柔体时，使用可选且准确配套的 **sca-physics==0.1.8rc1**。许可为 Apache-2.0，来源见 [NOTICE](NOTICE)、[LICENSE](LICENSE) 和 [源码来源](docs/PROVENANCE.zh-CN.md)。依赖、升级和兼容边界见 [rc2 发布准备说明](docs/release-0.1.8rc2.zh-CN.md)。
@@ -22,8 +24,8 @@ rc2精细设置的受控三档原量值门槛已复核，但严格瞬时静态�
 
 当前声明支持 Windows x86-64、Python 3.12、SimpleCADAPI `>=2.2.5,<2.2.6`。
 导出代码和虚拟环境独立于主 SCA 项目；不修改核心源码、原有导出器或 `sca export` 的格式列表。
-本说明给出本地安装流程，实际检查结果以运行输出为准；此版本的 GitHub 安装尚未验收。
-物理配置由独立 `sca-physics` 插件补充到最终产品包。导出器通过其 Python 合同校验器及网格/预算辅助函数消费根定义 `metadata.sca_physics`，支持每实例接触材料、碰撞及排除、被动关节阻尼、场景方向和完整来源记录；因此物理路径不是仅凭 JSON 互通。工作流程与单位见 [产品包物理配置](docs/PHYSICS.zh-CN.md)。该可选本地依赖尚未发布；需要物理路径时，准备环境前将 `SCA_PHYSICS_SOURCE` 指向匹配仓库或 wheel。未配置该变量时，只准备独立几何环境。
+下文保留本地源码安装流程；Release附件使用上面的公开下载指南。GitHub附件下载与安装的实际结果见对应Pre-release正文，不把历史本地安装结论代替下载验收。
+物理配置由独立 `sca-physics` 插件补充到最终产品包。导出器通过其 Python 合同校验器及网格/预算辅助函数消费根定义 `metadata.sca_physics`，支持每实例接触材料、碰撞及排除、被动关节阻尼、场景方向和完整来源记录；因此物理路径不是仅凭 JSON 互通。工作流程与单位见 [产品包物理配置](docs/PHYSICS.zh-CN.md)。配套依赖从上述physics Pre-release取得并校验解压；需要物理路径时，准备环境前将 `SCA_PHYSICS_SOURCE` 指向匹配仓库或 wheel。未配置该变量时，只准备独立几何环境。
 原 2.2.4 环境的历史检查见 [2026-10-16 验收记录](docs/VERIFICATION.zh-CN.md)；其中旧默认值和环境记录只描述当时状态。本轮 2.2.5 的检查以新测试与报告为准。
 实际新环境和 99 项测试结果见 [2026-10-17 检查](docs/VERIFICATION-20261017.zh-CN.md)。
 

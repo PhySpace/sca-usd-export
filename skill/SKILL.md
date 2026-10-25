@@ -143,7 +143,7 @@ mode 省略时沿用旧静态/动态推断；明确 static/dynamic/kinematic 时
 分别报告写出成功、几何与静态物理描述检查、实际仿真器验证。初始化检查只核对后端注册、身份、质量/惯量和有限状态；行为验证要有对应任务的载荷、动作、连接与接触观测；精度验证另需相应数值收敛、理论或实物参照。延长 smoke 时间不能替代后两类证据。
 没有运行 Isaac Sim 时，始终保持 `simulator_validated=false`，不承诺碰撞生成、机器人接触或推门结果。
 若关节或装配出现错位，核对真实连接器、锚点、轴向及单位，结合当前输入定位原因，不自行调整几何掩盖问题。
-GitHub 安装流程目前未验收；已声明的平台和版本范围不代表其他组合也受支持。
+GitHub附件下载与安装的本次实际结果见 https://github.com/PhySpace/sca-usd-export/releases/tag/v0.1.8rc2 ；公开安装步骤位于实际payload的docs/release-installation.zh-CN.md。已声明的平台和版本范围不代表其他组合也受支持。
 
 ## 通用刚体关节线缆
 

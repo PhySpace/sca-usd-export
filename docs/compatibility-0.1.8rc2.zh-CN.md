@@ -1,6 +1,6 @@
 # 0.1.8rc2 兼容、依赖与升级矩阵
 
-这是候选提交说明，未正式发布。导出端为 **sca-usd-export 0.1.8rc2**，物理写入/合同实现端为 **sca-physics 0.1.8rc1**；只验证这一准确配对，不为同号而调整版本。USD 负责最终包读取、USD/报告/历史及静态回读，physics 负责有来源的物理声明及持久化校验。
+这是rc预发布候选的兼容说明，不是稳定版保证。公开附件下载、校验、解压及官方SCA目录安装见[安装指南](release-installation.zh-CN.md)，实际下载验收结果见对应Release正文。导出端为 **sca-usd-export 0.1.8rc2**，物理写入/合同实现端为 **sca-physics 0.1.8rc1**；只验证这一准确配对，不为同号而调整版本。USD 负责最终包读取、USD/报告/历史及静态回读，physics 负责有来源的物理声明及持久化校验。
 
 本地证据为工作区 `personal-workspace/results/addon-release-preparation/20261025_162555/` 的 REPORT、REPRODUCE、`compatibility/RESULTS.zh-CN.md`、`compatibility/latest-api-summary.json`、`pair-final/steps.json` 和 `standalone-final/steps.json`。本文件提取其用户边界；原输入、命令、逐进程模块路径和日志保留在该结果目录，未把运行环境或日志加入源码仓库。
 
@@ -83,4 +83,4 @@ if ($LASTEXITCODE -ne 0) { throw 'USD validation failed' }
 
 SCA2.2.5本地add接受目录：候选ZIP先解压，再 `addon add <含sca-addon.toml的目录>`，不把ZIP直接作为add输入。短状态根实测为工作区下 `personal-workspace/results/arp-20261025-162555/s`（独立）和 `p`（配套），home为`s/a`、`p/a`，skills为`s/s`、`p/s`，runtime在`s/runtimes`、`p/runtimes`。新安装选新的同等短根；这些是本地已测路径建议，不是硬编码必需路径。深路径实测pip解包Jedi依赖失败（WinError206），不能仅import通过便称安装成功。安装代码/runtime根不能含单引号或cmd元字符；数据路径可以含中文、空格、单引号和&，但必须经包装器JSON/Base64传输。具体命令及隔离用户配置要求见[README](../README.zh-CN.md)。
 
-**未验证：两项外部CAD-FEM fixture检查、Isaac／PhysX行为、其他系统/Python/SDK/OpenUSD组合、全部历史版本组合和全部旧参数分支。**物理schema1.2–1.6的全部真实历史成品没有逐一实跑；GitHub下载安装也未验收。add-on安装、保存/重载、静态USD成功不证明原生物理行为、工程精度或支持所有Isaac属性。输出保持 `simulator_validated=false`，既有严格力学失败与Capsule/预览/FEM边界继续保留。
+**未验证：两项外部CAD-FEM fixture检查、Isaac／PhysX行为、其他系统/Python/SDK/OpenUSD组合、全部历史版本组合和全部旧参数分支。**物理schema1.2–1.6的全部真实历史成品没有逐一实跑；前轮证据未包含GitHub下载安装；本次附件下载验收实际结果以对应Release正文为准。add-on安装、保存/重载、静态USD成功不证明原生物理行为、工程精度或支持所有Isaac属性。输出保持 `simulator_validated=false`，既有严格力学失败与Capsule/预览/FEM边界继续保留。

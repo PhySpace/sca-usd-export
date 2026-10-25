@@ -1,4 +1,6 @@
-# 0.1.8rc2 本地候选与兼容边界
+# 0.1.8rc2 预发布候选与兼容边界
+
+GitHub交付：源码继续在main维护，手动ZIP与SHA256SUMS在[v0.1.8rc2 Pre-release](https://github.com/PhySpace/sca-usd-export/releases/tag/v0.1.8rc2)分发；[公开安装指南](release-installation.zh-CN.md)提供下载、校验、解压、官方目录安装、短路径及配套升级步骤。实际下载验收结果见Release正文。本次只补交付说明，不改运行代码、版本或依赖。
 
 USD 0.1.8rc2 负责读取最终产品包、写出 USD/报告/历史并静态回读；physics 0.1.8rc1 负责物理声明、来源及持久化校验。两者无需同号。USD 的依赖与安装合同发生修正，沿用历史 rc1→rc2 规则；物理数据格式和求解策略未因本轮改动改变。
 

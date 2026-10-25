@@ -1,6 +1,6 @@
 # 0.1.8rc2：独立几何依赖与候选安装边界
 
-候选审查补充：准确配对为physics0.1.8rc1+USD0.1.8rc2，实测Windows x86-64/Python3.12.15/SDK2.2.5/OpenUSD26.8/OCP7.9.3.1。所选schema1.0、1.1成品包和旧路径/内存API通过；**旧无来源裸参数原样不兼容；按要求补充来源信息后，所测试案例通过。**迁移例子、真实依赖分类、单独/配套升级、短路径及两项外部FEM/Isaac行为等未验证范围见[兼容与升级矩阵](compatibility-0.1.8rc2.zh-CN.md)。这是候选审查，未正式发布；文档更新后重新封装并记录最终包哈希，保留前轮证据。
+候选审查记录（2026-10-25）：准确配对为physics0.1.8rc1+USD0.1.8rc2，实测Windows x86-64/Python3.12.15/SDK2.2.5/OpenUSD26.8/OCP7.9.3.1。所选schema1.0、1.1成品包和旧路径/内存API通过；**旧无来源裸参数原样不兼容；按要求补充来源信息后，所测试案例通过。**迁移例子、真实依赖分类、单独/配套升级、短路径及两项外部FEM/Isaac行为等未验证范围见[兼容与升级矩阵](compatibility-0.1.8rc2.zh-CN.md)。该轮审查时尚未发布；文档更新后重新封装并记录包哈希，保留前轮证据。当前rc交付与实际附件下载验收结果见[v0.1.8rc2 Pre-release](https://github.com/PhySpace/sca-usd-export/releases/tag/v0.1.8rc2)，可运行公开安装步骤见[下载与安装指南](release-installation.zh-CN.md)；不将rc称为稳定版。
 
 物理 Python 依赖从必需项移到 `physics` extra，准确配套仍为 sca-physics==0.1.8rc1；未设置 SCA_PHYSICS_SOURCE 的新 runtime 可独立导出没有物理 metadata 的产品包。配套模式保留文件身份检查；含物理 metadata 但缺依赖或版本错误时明确拒绝。修正 dispatcher 的 SCA 版本提示，保留公开函数/参数、Schema 1.0–1.8 和已保存物理量，不修改原生仿真策略。此变更调整包与安装合同，按已有 rc 序列递增 USD 至 rc2；不要求物理插件同步改版本。依赖、安装和验证范围见 [本候选说明](release-0.1.8rc2.zh-CN.md)。
 
