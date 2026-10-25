@@ -91,7 +91,7 @@ function ConvertFrom-ScaUsdEncodedArguments {
                 throw 'Every JSON argument must be a string without NUL characters.'
             }
         }
-        if ($values[0] -cnotin @('export', 'validate', 'history', 'preview', 'check', 'provision', '--help', '-h')) {
+        if ($values[0] -cnotin @('export', 'prepare-deformable', 'validate', 'history', 'preview', 'check', 'provision', '--help', '-h')) {
             throw 'Expected an addon CLI command, --help, or provision as the first argument.'
         }
         return ,$values

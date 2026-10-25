@@ -1,6 +1,9 @@
 """Fixed entry executed by dispatch.ps1 with the add-on interpreter, -I and -B."""
 
 import json
+import os
+from pathlib import Path
+import runpy
 import sys
 
 
@@ -13,6 +16,11 @@ def main():
         print("Run this entry with python -I -B", file=sys.stderr)
         return 2
     try:
+        scripts = Path(__file__).resolve().parent
+        runtime = os.environ.get("SCA_RUNTIME_DIR")
+        if not runtime:
+            raise ValueError("SCA_RUNTIME_DIR is missing; invoke this installation through its dispatcher")
+        runpy.run_path(str(scripts / "install_identity.py"))["guard"](scripts.parent, runtime)
         from sca_usd_export.transport import decode_args
 
         if len(sys.argv) != 3 or sys.argv[1] != "argv-json-base64":

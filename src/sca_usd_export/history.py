@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,23 @@ def _json_bytes(value: Any) -> bytes:
 
 def _sha256(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _filesystem_path(path: Path) -> Path:
+    """Use Windows' native long-path form for file I/O, without changing URLs.
+
+    CAD feature resources have content-addressed names. A perfectly ordinary
+    result directory can therefore exceed MAX_PATH once the history suffix and
+    digest are appended. No machine-wide long-path setting is required.
+    """
+    if os.name != "nt":
+        return path
+    absolute = str(path.absolute())
+    if absolute.startswith("\\\\?\\"):
+        return path
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
 
 
 def _identity(definition: Any) -> dict[str, str]:
@@ -71,7 +89,7 @@ def _definitions(root: Any) -> list[Any]:
 
 
 def _write_resource(directory: Path, path: str, payload: bytes) -> dict[str, Any]:
-    target = directory / path
+    target = _filesystem_path(directory / path)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("xb") as stream:
         stream.write(payload)
@@ -96,7 +114,7 @@ def write_history_bundle(
     from simplecadapi.artifacts.feature_graph import load_feature_graph_artifact
 
     destination = Path(output_dir).expanduser().resolve()
-    if destination.exists():
+    if _filesystem_path(destination).exists():
         raise FileExistsError(f"History output directory already exists: {destination}")
 
     # Prepare and validate every payload before creating the output directory.
@@ -116,7 +134,7 @@ def write_history_bundle(
             (definition, bytes(definition.canonical_bytes), graph_bytes, artifact)
         )
 
-    destination.mkdir(parents=True, exist_ok=False)
+    _filesystem_path(destination).mkdir(parents=True, exist_ok=False)
     records: list[dict[str, Any]] = []
     for definition, definition_bytes, graph_bytes, artifact in prepared:
         identity = _identity(definition)
@@ -164,7 +182,7 @@ def write_history_bundle(
     }
     manifest["content_hash"] = _sha256(_json_bytes(manifest))
     path = destination / "history.json"
-    with path.open("xb") as stream:
+    with _filesystem_path(path).open("xb") as stream:
         stream.write(_json_bytes(manifest))
     return path
 
@@ -182,7 +200,7 @@ def _resource_path(manifest_path: Path, record: dict[str, Any]) -> Path:
 def read_history_bundle(manifest_path: str | Path) -> dict[str, Any]:
     """Read a bundle and verify all resource digests; no CAD execution occurs."""
     path = Path(manifest_path).expanduser().resolve()
-    manifest = json.loads(path.read_bytes())
+    manifest = json.loads(_filesystem_path(path).read_bytes())
     if (
         not isinstance(manifest, dict)
         or manifest.get("schema_version") != "1.0"
@@ -200,7 +218,7 @@ def read_history_bundle(manifest_path: str | Path) -> dict[str, Any]:
         seen.add(definition_id)
         for role in ("definition", "feature_graph"):
             record = definition[role]
-            payload = _resource_path(path, record).read_bytes()
+            payload = _filesystem_path(_resource_path(path, record)).read_bytes()
             if (
                 len(payload) != record["byte_length"]
                 or _sha256(payload) != record["sha256"]
@@ -244,7 +262,7 @@ def read_feature_graph(manifest_path: str | Path, definition_id: str) -> Any:
     for record in manifest["definitions"]:
         if record["definition_id"] == definition_id:
             artifact = load_feature_graph_artifact(
-                _resource_path(path, record["feature_graph"])
+                _filesystem_path(_resource_path(path, record["feature_graph"]))
             )
             actual = (
                 artifact.owner_definition_id,

@@ -26,7 +26,7 @@ try {
         $commandArguments = ConvertFrom-ScaUsdEncodedArguments $token
     }
     else {
-        throw "Use scripts/use.ps1 -Arguments @('export','INPUT.scadpkg','OUTPUT.usda'), or the safe check/provision commands. Raw paths after sca addon use are unsupported on SCA 2.2.4 Windows."
+        throw "Use scripts/use.ps1 -Arguments @('export','INPUT.scadpkg','OUTPUT.usda'), or the safe check/provision commands. Raw paths after sca addon use are unsupported on SCA 2.2.5 Windows."
     }
     $childEnvironment = @{
         SCA_ADDON_DIR = $payload
@@ -42,9 +42,10 @@ try {
         if (-not (Test-Path -LiteralPath $provision -PathType Leaf)) { throw "Provision script is missing: $provision" }
         $powershell = Join-Path $PSHOME 'powershell.exe'
         $exitCode = Start-ScaUsdNativeProcess $powershell @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $provision) $childEnvironment
-        # This dispatcher runs in a dedicated powershell.exe process. Plain
-        # `exit` inside a dot-sourced -Command script normalizes nonzero codes
-        # to 1, so terminate this child explicitly with the native return code.
+        # Normal successful shutdown avoids a measured CLR Exit delay. Plain
+        # `exit` in the descriptor's dot-sourced -Command normalizes nonzero
+        # codes to 1, so preserve those exact native codes with Environment.Exit.
+        if ($exitCode -eq 0) { exit 0 }
         [Environment]::Exit($exitCode)
     }
     $python = Join-Path $runtime '.venv\Scripts\python.exe'
@@ -54,6 +55,7 @@ try {
     $entry = Join-Path $PSScriptRoot 'runtime_cli.py'
     if (-not (Test-Path -LiteralPath $entry -PathType Leaf)) { throw "Runtime entry script is missing: $entry" }
     $exitCode = Start-ScaUsdNativeProcess $python @('-I', '-B', $entry, 'argv-json-base64', $token) $childEnvironment
+    if ($exitCode -eq 0) { exit 0 }
     [Environment]::Exit($exitCode)
 }
 catch {
