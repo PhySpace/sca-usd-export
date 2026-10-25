@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-pxr = pytest.importorskip("pxr")
+import pxr
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 
 import simplecadapi as scad
@@ -374,3 +374,42 @@ def test_every_demonstration_default_records_value_unit_and_reason():
         "node_id" in item or "group_id" in item or "prim_path" in item
         for item in report["defaults"]
     )
+
+
+def test_prismatic_passive_damping_uses_si_force_drive_without_angular_conversion():
+    from sca_usd_export.embedded_physics import legacy_settings
+
+    stage, records, graph = _fixture(("base", "slider"))
+    graph.ground_edges.append({"parent_node_id": "node/fixture", "child_node_id": "node/fixture/base"})
+    _joint(graph, "prismatic", "base", "slider")
+    config = ExportConfig()
+    settings = legacy_settings(records, graph, config)
+    settings["joints"][graph.joints[0]["joint_id"]]["damping"] = {
+        "value": 2.5, "unit": "N*s/m", "source": {"kind": "explicit", "detail": "test linear passive damping"}}
+    report = apply_physics(stage, records, graph, config, settings)
+    drive = UsdPhysics.DriveAPI(stage.GetPrimAtPath(report["joints"][0]["prim_path"]), "linear")
+    assert drive.GetDampingAttr().Get() == pytest.approx(2.5)
+    assert drive.GetStiffnessAttr().Get() == 0
+    assert drive.GetTargetVelocityAttr().Get() == 0
+    assert drive.GetTypeAttr().Get() == "force"
+
+
+def test_joint_collision_false_filters_static_and_dynamic_actual_shapes():
+    stage, records, graph = _fixture(("base", "arm"))
+    graph.ground_edges.append({"parent_node_id": "node/fixture", "child_node_id": "node/fixture/base"})
+    _joint(graph, "revolute", "base", "arm")
+    report = apply_physics(stage, records, graph, ExportConfig())
+    assert report["dynamic_body_count"] == 1
+    assert len(report["collision_exclusions"]) == 1
+    pair = report["collision_exclusions"][0]
+    assert pair["reasons"][0]["origin"] == "joint.collision_enabled=false"
+    assert stage.GetPrimAtPath(pair["a_path"]).HasAPI(UsdPhysics.FilteredPairsAPI)
+    assert stage.GetPrimAtPath(pair["a_path"]).GetRelationship("physics:filteredPairs").GetTargets() == [Sdf.Path(pair["b_path"])]
+
+
+def test_joint_collision_true_omits_derived_filter():
+    stage, records, graph = _fixture(("base", "arm"))
+    graph.ground_edges.append({"parent_node_id": "node/fixture", "child_node_id": "node/fixture/base"})
+    _joint(graph, "revolute", "base", "arm")
+    report = apply_physics(stage, records, graph, ExportConfig(joint_collision_enabled=True))
+    assert report["collision_exclusions"] == []

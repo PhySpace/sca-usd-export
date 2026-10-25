@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sca-usd-export"
-version = "0.1.0"
+version = "0.1.8rc2"
 description = "Independent SimpleCADAPI product-package to OpenUSD add-on"
 readme = "README.zh-CN.md"
 requires-python = ">=3.12,<3.13"
 license = "Apache-2.0"
 dependencies = [
-    "simplecadapi>=2.2.4,<2.2.5",
+    "simplecadapi>=2.2.5,<2.2.6",
     "usd-core==26.8",
     "numpy==2.3.1",
     "cadquery-ocp==7.9.3.1",
@@ -18,7 +18,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<10"]
+physics = ["sca-physics==0.1.8rc1"]
+test = ["pytest>=8,<10", "jsonschema>=4,<5", "sca-physics==0.1.8rc1"]
 
 [project.scripts]
 sca-usd-export = "sca_usd_export.cli:main"

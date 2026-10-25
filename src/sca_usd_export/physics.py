@@ -109,7 +109,8 @@ def _frame_matrix(payload: Any) -> Any:
 
 
 def apply_physics(
-    stage: Any, records: list[dict[str, Any]], occurrence_graph: Any, config: Any
+    stage: Any, records: list[dict[str, Any]], occurrence_graph: Any, config: Any,
+    settings: Any = None,
 ) -> dict[str, Any]:
     """Add physical groups, collision meshes, masses and supported SCA joints.
 
@@ -121,6 +122,10 @@ def apply_physics(
     USD and OCP dependencies are imported only when this function is called.
     """
     import numpy as np
+    from .embedded_physics import legacy_settings
+    from .mechanical_properties import BODY, COLLISION, CONTACT, author_optional, merge_rigid_body
+
+    settings = settings or legacy_settings(records, occurrence_graph, config)
 
     try:
         from pxr import Gf, Sdf, UsdGeom, UsdPhysics, UsdShade
@@ -167,6 +172,16 @@ def apply_physics(
     by_id = {record["node_id"]: record for record in records}
     if len(by_id) != len(records):
         raise ValueError("Duplicate occurrence node_id in physics records")
+    deformable_targets = {
+        cable['target_node_id']: cable_id
+        for cable_id, cable in settings.get('cables', {}).items()
+        if cable.get('target_node_id') is not None
+    }
+    for target, cable_id in deformable_targets.items():
+        if target not in by_id or by_id[target]['kind'] != 'part':
+            raise ValueError(f"{cable_id}: cable replacement target must resolve to an existing CAD part occurrence: {target}")
+        if settings['parts'][target].get('rigid_body'):
+            raise ValueError(f"{target}: rigid_body declaration conflicts with a cable replacement; explicitly convert it through sca-physics")
     for record in records:
         matrix = np.asarray(record["world_matrix"], dtype=float)
         if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
@@ -211,6 +226,8 @@ def apply_physics(
         first, second = str(edge["parent_node_id"]), str(edge["child_node_id"])
         if first not in by_id or second not in by_id:
             raise ValueError("Grounding edge references an absent occurrence")
+        if first in deformable_targets or second in deformable_targets:
+            raise ValueError(f"Deformable CAD occurrence is natively grounded: {first} -> {second}; remove grounding and declare supported explicit endpoint attachments")
         groups.union(first, second)
         fixed_records.append({"kind": "ground", "a": first, "b": second})
     joint_edges: list[dict[str, Any]] = []
@@ -226,8 +243,12 @@ def apply_physics(
             "connector_a": first,
             "connector_b": second,
         }
+        if edge['a'] in deformable_targets or edge['b'] in deformable_targets:
+            raise ValueError(f"CAD joint {joint['joint_id']} references selected deformable occurrence; rigid CAD joint semantics cannot be silently discarded; use explicit deformable endpoint attachments")
         kind = str(joint["joint_type"])
         if kind == "fixed":
+            if settings["joints"][str(joint["joint_id"] )]["collision_enabled"]["value"]:
+                raise ValueError(f"Fixed joint {joint['joint_id']}: collision_enabled=true is unsupported inside one rigid group")
             groups.union(edge["a"], edge["b"])
             fixed_records.append(
                 {
@@ -252,7 +273,7 @@ def apply_physics(
     for node_id in sorted(by_id):
         members[groups.find(node_id)].append(node_id)
     part_groups = {
-        group_id: [by_id[node] for node in nodes if by_id[node]["kind"] == "part"]
+        group_id: [by_id[node] for node in nodes if by_id[node]["kind"] == "part" and node not in deformable_targets]
         for group_id, nodes in members.items()
     }
     adjacency: dict[str, set[str]] = defaultdict(set)
@@ -297,6 +318,37 @@ def apply_physics(
             or config.unconnected_body_policy == "dynamic"
         )
     }
+    group_modes, rigid_settings, rigid_sources = {}, {}, {}
+    for group_id, parts in part_groups.items():
+        if not parts:
+            continue
+        rigid, contributors = merge_rigid_body(parts, settings, group_id)
+        mode = rigid.get("mode", {}).get("value", "dynamic" if group_id in dynamic_groups else "static")
+        if mode not in {"static", "dynamic", "kinematic"}:
+            raise ValueError(f"Invalid rigid body mode for group {group_id!r}: {mode!r}")
+        if mode != "static" and (group_id in frozen or (group_id == root_group and root_is_assembly)):
+            raise ValueError(f"Group {group_id!r} is natively grounded or frozen; cannot request {mode}")
+        if mode == "static" and any(field != "mode" and parameter.get("mode") != "engine_default" for field, parameter in rigid.items()):
+            raise ValueError(f"Static group {group_id!r} cannot use explicit gravity/damping")
+        group_modes[group_id], rigid_settings[group_id], rigid_sources[group_id] = mode, rigid, contributors
+    dynamic_groups = {group_id for group_id, mode in group_modes.items() if mode == "dynamic"}
+    kinematic_groups = {group_id for group_id, mode in group_modes.items() if mode == "kinematic"}
+    articulation_request = settings.get("assembly", {}).get("articulation")
+    articulation_enabled = bool(articulation_request and articulation_request["enabled"]["value"])
+    anchored_group = None
+    if articulation_enabled and articulation_request["fixed_base"]["value"]:
+        selected = groups.find(articulation_request["root_node_id"])
+        if selected not in group_modes:
+            raise ValueError("Fixed articulation root must resolve to a geometric rigid group")
+        if group_modes[selected] == "static":
+            # Grounding remains exact, represented by a world FixedJoint. PhysX
+            # needs a rigid root link, not a static collider as an inbound link.
+            if selected in frozen:
+                raise ValueError("Articulation root cannot be frozen by unsupported CAD constraints")
+            anchored_group = selected
+            group_modes[selected] = "dynamic"
+            dynamic_groups.add(selected)
+    actor_groups = dynamic_groups | kinematic_groups
     default_prim = stage.GetDefaultPrim()
     physics_root = (
         str(default_prim.GetPath()) + "/Physics" if default_prim else "/Physics"
@@ -313,11 +365,7 @@ def apply_physics(
         Gf.Vec3f(0, -1, 0) if up_axis == "Y" else Gf.Vec3f(0, 0, -1)
     )
     scene.CreateGravityMagnitudeAttr(gravity)
-    material = UsdShade.Material.Define(stage, physics_root + "/DefaultContactMaterial")
-    material_api = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
-    material_api.CreateStaticFrictionAttr(friction)
-    material_api.CreateDynamicFrictionAttr(friction)
-    material_api.CreateRestitutionAttr(restitution)
+    UsdGeom.Scope.Define(stage, physics_root + "/ContactMaterials")
 
     def set_transform(prim: Any, matrix: Any) -> None:
         xform = UsdGeom.Xformable(prim)
@@ -349,11 +397,14 @@ def apply_physics(
     ]
     warnings: list[str] = []
     collider_count = 0
+    shape_paths = {}
+    optional_records = []
     for group_id in sorted(part_groups):
         parts = part_groups[group_id]
         if not parts:
             continue
         dynamic = group_id in dynamic_groups
+        mode = group_modes[group_id]
         body_path = physics_root + "/Bodies/" + _name("Body", group_id)
         body = UsdGeom.Xform.Define(stage, body_path)
         frame = np.asarray(parts[0]["world_matrix"], dtype=float)
@@ -366,10 +417,12 @@ def apply_physics(
         body.GetPrim().CreateRelationship("simplecad:components").SetTargets(
             [Sdf.Path(by_id[node]["prim_path"]) for node in members[group_id]]
         )
-        if dynamic:
+        if group_id in actor_groups:
             rigid_api = UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
             rigid_api.CreateRigidBodyEnabledAttr(True)
-            rigid_api.CreateKinematicEnabledAttr(False)
+            rigid_api.CreateKinematicEnabledAttr(mode == "kinematic")
+        optional_records.extend(author_optional(body.GetPrim(), rigid_settings[group_id], BODY,
+            scope="rigid_body", node_ids=[part["node_id"] for part in parts], body_mode=mode))
         reason = (
             "supported_joint_connected_to_ground"
             if dynamic and group_id != root_group and group_id in reachable_from_world
@@ -387,6 +440,8 @@ def apply_physics(
                 )
             )
         )
+        if "mode" in rigid_settings[group_id]:
+            reason = "explicit_package_body_mode"
         if reason in {"explicit_dynamic_policy", "unconnected_static_policy"}:
             defaults.append(
                 {
@@ -397,15 +452,6 @@ def apply_physics(
                     "source": "config.unconnected_body_policy",
                     "reason": "SCA has no explicit movable connection from this group to the grounded assembly",
                 }
-            )
-        approximation = (
-            config.dynamic_collision_approximation
-            if dynamic
-            else config.static_collision_approximation
-        )
-        if dynamic and approximation == "convexHull":
-            warnings.append(
-                f"{group_id}: convexHull collision can fill holes and concavities; simulator collision cooking remains unverified"
             )
         part_properties: list[dict[str, Any]] = []
         mass_sum = 0.0
@@ -430,31 +476,46 @@ def apply_physics(
             )
             set_transform(shape, local)
             UsdGeom.Imageable(shape).CreateVisibilityAttr(UsdGeom.Tokens.inherited)
-            UsdPhysics.CollisionAPI.Apply(shape).CreateCollisionEnabledAttr(True)
+            part_settings = settings["parts"][record["node_id"]]
+            contact = part_settings["contact"]
+            collision = part_settings["collision"]
+            enabled = collision["enabled"]["value"]
+            approximation = collision["approximation_dynamic" if group_id in actor_groups else "approximation_static"]["value"]
+            if group_id in actor_groups and enabled and approximation == "none":
+                raise ValueError(f"{record['node_id']}: dynamic triangle mesh approximation 'none' is unsupported; choose convexHull")
+            if approximation not in allowed_approximations:
+                raise ValueError(f"{record['node_id']}: unsupported collision approximation {approximation!r}")
+            if dynamic and enabled and approximation == "convexHull":
+                warnings.append(f"{record['node_id']}: convexHull collision can fill holes and concavities; simulator collision cooking remains unverified")
+            UsdPhysics.CollisionAPI.Apply(shape).CreateCollisionEnabledAttr(enabled)
             UsdPhysics.MeshCollisionAPI.Apply(shape).CreateApproximationAttr(
                 approximation
             )
+            optional_records.extend(author_optional(shape, collision, COLLISION,
+                scope="collision", node_ids=[record["node_id"]]))
+            material_path = physics_root + "/ContactMaterials/" + _name("Contact", record["node_id"])
+            material = UsdShade.Material.Define(stage, material_path)
+            material_api = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
+            material_api.CreateStaticFrictionAttr(contact["static_friction"]["value"])
+            material_api.CreateDynamicFrictionAttr(contact["dynamic_friction"]["value"])
+            material_api.CreateRestitutionAttr(contact["restitution"]["value"])
             UsdShade.MaterialBindingAPI.Apply(shape).Bind(
                 material, materialPurpose="physics"
             )
+            optional_records.extend(author_optional(material.GetPrim(), contact, CONTACT,
+                scope="contact", node_ids=[record["node_id"]]))
             density, density_source = _density(record["item"], config)
-            for field, value in (
-                ("static_friction", friction),
-                ("dynamic_friction", friction),
-                ("restitution", restitution),
-            ):
+            for field, parameter in contact.items():
+                if field in CONTACT:
+                    continue
                 defaults.append(
                     {
                         "node_id": record["node_id"],
                         "field": field,
-                        "value": value,
-                        "unit": "dimensionless",
-                        "source": (
-                            "config.default_restitution"
-                            if field == "restitution"
-                            else "config.default_friction"
-                        ),
-                        "reason": "SCA Material has no contact friction or restitution field",
+                        "value": parameter["value"],
+                        "unit": parameter["unit"],
+                        "source": parameter["source"],
+                        "reason": parameter["source"]["detail"],
                     }
                 )
             defaults.append(
@@ -463,12 +524,8 @@ def apply_physics(
                     "field": "collision_approximation",
                     "value": approximation,
                     "unit": "policy",
-                    "source": (
-                        "config.dynamic_collision_approximation"
-                        if dynamic
-                        else "config.static_collision_approximation"
-                    ),
-                    "reason": "SCA does not specify a physics collision proxy",
+                    "source": collision["approximation_dynamic" if group_id in actor_groups else "approximation_static"]["source"],
+                    "reason": "Resolved sca_physics collision policy; none means triangle mesh, not disabled collision",
                 }
             )
             if density_source.startswith("config."):
@@ -519,6 +576,11 @@ def apply_physics(
                     "density_kg_m3": density,
                     "density_source": density_source,
                     "mass_kg": mass,
+                    "contact_material_path": material_path,
+                    "contact": contact,
+                    "collision_enabled": enabled,
+                    "collision_approximation": approximation,
+                    "collision": collision,
                     "_com": com,
                     "_inertia": inertia,
                 }
@@ -526,6 +588,7 @@ def apply_physics(
             mass_sum += mass
             com_sum += mass * com
             collider_count += 1
+            shape_paths[record["node_id"]] = shape_path
         com = com_sum / mass_sum
         tensor = np.zeros((3, 3))
         for part in part_properties:
@@ -551,8 +614,13 @@ def apply_physics(
                 "body_path": body_path,
                 "members": members[group_id],
                 "dynamic": dynamic,
+                "mode": mode,
+                "kinematic": mode == "kinematic",
+                "anchored_root": group_id == anchored_group,
+                "rigid_body": rigid_settings[group_id],
+                "rigid_body_sources": rigid_sources[group_id],
                 "reason": reason,
-                "collision_approximation": approximation,
+                "collision_approximations": sorted({part["collision_approximation"] for part in part_properties}),
                 "mass_kg": mass_sum,
                 "center_of_mass_body_m": com.tolist(),
                 "inertia_tensor_body_kg_m2": tensor.tolist(),
@@ -562,6 +630,7 @@ def apply_physics(
         )
 
     joint_records: list[dict[str, Any]] = []
+    mimic_followers = {c["follower_joint_id"] for c in settings.get("couplings", {}).values()}
     for edge in joint_edges:
         joint = edge["joint"]
         kind = str(joint["joint_type"])
@@ -574,11 +643,12 @@ def apply_physics(
             "body0_group": first,
             "body1_group": second,
         }
-        if first not in dynamic_groups and second not in dynamic_groups:
+        if first not in actor_groups and second not in actor_groups:
             record.update(
                 {
                     "authored": False,
                     "reason": "Both groups are conservative static colliders",
+                    "requested_configuration": settings["joints"][str(joint["joint_id"])],
                 }
             )
             joint_records.append(record)
@@ -597,20 +667,22 @@ def apply_physics(
         usd_joint.CreateBody0Rel().SetTargets([Sdf.Path(body_paths[first])])
         usd_joint.CreateBody1Rel().SetTargets([Sdf.Path(body_paths[second])])
         usd_joint.CreateAxisAttr("Z")
-        usd_joint.CreateCollisionEnabledAttr(config.joint_collision_enabled)
+        joint_settings = settings["joints"][str(joint["joint_id"]) ]
+        usd_joint.CreateCollisionEnabledAttr(joint_settings["collision_enabled"]["value"])
         defaults.append(
             {
                 "joint_id": str(joint["joint_id"]),
                 "field": "joint_collision_enabled",
-                "value": config.joint_collision_enabled,
+                "value": joint_settings["collision_enabled"]["value"],
                 "unit": "boolean",
-                "source": "config.joint_collision_enabled",
-                "reason": "SCA constraints do not specify collision filtering between their endpoint bodies",
+                "source": joint_settings["collision_enabled"]["source"],
+                "reason": joint_settings["collision_enabled"]["source"]["detail"],
             }
         )
         usd_joint.GetPrim().CreateAttribute(
             "simplecad:jointId", Sdf.ValueTypeNames.String
         ).Set(str(joint["joint_id"]))
+        frames = {}
         for side, group_id, suffix in (("a", first, "0"), ("b", second, "1")):
             connector = edge["connector_" + side]
             joint_world = np.asarray(
@@ -623,10 +695,23 @@ def apply_physics(
             getattr(usd_joint, "CreateLocalRot" + suffix + "Attr")(
                 quaternion(local[:3, :3])
             )
+            frames[suffix] = {"position_m": local[:3, 3].tolist(),
+                              "rotation_matrix": local[:3, :3].tolist(),
+                              "world_position_m": joint_world[:3, 3].tolist(),
+                              "world_axis": joint_world[:3, 2].tolist()}
+        # The SI addon declaration is authoritative when motion is explicit.
+        # Otherwise preserve the native CAD limit/legacy-unbounded policy.
         limit_key = "angle_limit" if kind == "revolute" else "distance_limit"
         limits = (joint.get("limits") or {}).get(limit_key)
+        motion = joint_settings.get("motion", {}).get("value")
+        if motion == "free":
+            limits = None
+        elif motion == "limited":
+            scale = 180 / math.pi if kind == "revolute" else 1000
+            limits = {"lower_value": joint_settings["lower_limit"]["value"] * scale,
+                      "upper_value": joint_settings["upper_limit"]["value"] * scale}
         if limits is None:
-            if config.joint_limit_policy == "error":
+            if config.joint_limit_policy == "error" and motion != "free":
                 raise ValueError(
                     f"Missing explicit limits for joint {joint['joint_id']!r}"
                 )
@@ -658,30 +743,141 @@ def apply_physics(
                 "upper": upper,
                 "unit": "degree" if kind == "revolute" else "m",
             }
+        from .joint_drives import author_drive, author_joint_extensions
+        damping = joint_settings["damping"]
+        follower = str(joint["joint_id"]) in mimic_followers
+        effective_drive = (None if follower else author_drive(usd_joint.GetPrim(), kind, joint_settings))
+        # J = inv(G0*L0)*(G1*L1), matching USD's joint-frame definition.
+        first_world = np.eye(4)
+        second_world = np.eye(4)
+        for matrix, frame in ((first_world, frames["0"]), (second_world, frames["1"])):
+            matrix[:3, :3] = body_frames[first if matrix is first_world else second][:3, :3] @ np.array(frame["rotation_matrix"])
+            matrix[:3, 3] = frame["world_position_m"]
+        relative = np.linalg.inv(first_world) @ second_world
+        coordinate = math.atan2(relative[1, 0], relative[0, 0]) if kind == "revolute" else float(relative[2, 3])
+        native_parameter = "drive_angle_degrees" if kind == "revolute" else "drive_distance"
+        parameters = joint.get("parameters") or {}
+        if native_parameter in parameters:
+            native_coordinate = float(parameters[native_parameter]) * (math.pi / 180 if kind == "revolute" else .001)
+            error = coordinate - native_coordinate
+            if kind == "revolute":
+                error = math.remainder(error, 2 * math.pi)
+            if abs(error) > 2e-6:
+                raise ValueError(f"Solved connector coordinate disagrees with native CAD initial parameter: {joint['joint_id']}")
+            # The solved rotation matrix alone loses whole revolutions. Keep
+            # the native parameter after checking physical frame consistency.
+            coordinate = native_coordinate
+        extensions = author_joint_extensions(usd_joint.GetPrim(), kind, joint_settings, coordinate, articulation_enabled)
         record.update(
             {
                 "authored": True,
                 "prim_path": path,
                 "axis": "connector local Z",
                 "cad_initial_coordinate": dict(joint.get("parameters") or {}),
-                "drive_authored": False,
+                "drive_authored": not follower,
+                "body0_path": body_paths[first], "body1_path": body_paths[second],
+                "frames": frames,
+                "collision_enabled": joint_settings["collision_enabled"],
+                "damping": damping,
+                "joint_configuration": joint_settings,
+                "motion": motion or "native_or_legacy",
+                "effective_drive": effective_drive,
+                "physx_extensions": extensions,
+                "initial_coordinate_si": coordinate,
+                "passive_drive": {"name": "angular" if kind == "revolute" else "linear", "type": "force", "stiffness": 0.0,
+                    "target_position": 0.0, "target_velocity": 0.0,
+                    "damping": damping["value"] * (math.pi / 180 if kind == "revolute" else 1.0),
+                    "unit": "kg*m^2/(s*degree)" if kind == "revolute" else "kg/s",
+                    "equation": "torque=-c*angular_velocity" if kind == "revolute" else "force=-c*linear_velocity",
+                    "conversion": "SI N*m*s/rad times pi/180" if kind == "revolute" else "SI N*s/m unchanged"},
             }
         )
         joint_records.append(record)
 
+    from .articulation import author_articulation
+    articulation = author_articulation(stage, settings, joint_records, group_records,
+        groups.find, str(occurrence_graph.root_node_id), physics_root)
+    from .joint_drives import author_mimic_couplings
+    couplings = author_mimic_couplings(stage, settings, joint_records, articulation)
+
+    filter_pairs = {}
+
+    def add_filter(first_id, second_id, reason):
+        if first_id not in shape_paths or second_id not in shape_paths:
+            raise ValueError("Collision exclusion must reference two existing part occurrences")
+        first_id, second_id = sorted((first_id, second_id))
+        key = (first_id, second_id)
+        pair = filter_pairs.setdefault(key, {"a": first_id, "b": second_id,
+            "a_path": shape_paths[first_id], "b_path": shape_paths[second_id], "reasons": []})
+        pair["reasons"].append(reason)
+
+    for pair in settings["assembly"]["collision_exclusions"]:
+        if pair['a'] in deformable_targets or pair['b'] in deformable_targets:
+            raise ValueError('Rigid assembly collision exclusion references a deformable target; use its explicit deformable attachment filtering policy')
+        add_filter(pair["a"], pair["b"], {"origin": "assembly.collision_exclusions", "source": pair["source"]})
+    for edge in joint_edges:
+        joint_id = str(edge["joint"]["joint_id"])
+        collision_parameter = settings["joints"][joint_id]["collision_enabled"]
+        first, second = groups.find(edge["a"]), groups.find(edge["b"])
+        if collision_parameter["value"] is False and first != second:
+            # PhysX resolves a static collider joint endpoint to world. In that
+            # case joint collisionEnabled=false alone does not filter its
+            # shapes; explicit collider pairs enforce the package policy.
+            for first_part in part_groups[first]:
+                for second_part in part_groups[second]:
+                    add_filter(first_part["node_id"], second_part["node_id"], {
+                        "origin": "joint.collision_enabled=false", "joint_id": joint_id,
+                        "source": collision_parameter["source"]})
+    exclusions = list(filter_pairs.values())
+    for edge in joint_edges:
+        joint_id = str(edge["joint"]["joint_id"])
+        if settings["joints"][joint_id]["collision_enabled"]["value"]:
+            first, second = groups.find(edge["a"]), groups.find(edge["b"])
+            for first_part in part_groups[first]:
+                for second_part in part_groups[second]:
+                    pair = filter_pairs.get(tuple(sorted((first_part["node_id"], second_part["node_id"]))))
+                    if pair:
+                        warnings.append(f"{joint_id}: collision_enabled=true is overridden by an explicit or another joint-derived collider exclusion for {pair['a']} and {pair['b']}")
+    for pair in exclusions:
+        UsdPhysics.FilteredPairsAPI.Apply(stage.GetPrimAtPath(pair["a_path"])).CreateFilteredPairsRel().AddTarget(Sdf.Path(pair["b_path"]))
+
     return {
         "physics_root": physics_root,
-        "body_count": len(dynamic_groups),
+        "deformable_targets": [{'node_id': target, 'cable_id': cable_id,
+            'physical_type': 'deformable_volume',
+            'rigid_routing': 'Excluded before rigid grouping, BREP mass integration and rigid collider authoring',
+            'mass_precedence': 'Explicit deformable material density times native FEM volume; CAD material density and rigid mass are not authored on this target'}
+            for target, cable_id in sorted(deformable_targets.items())
+            if settings['cables'][cable_id].get('representation', 'physx_deformable_volume') == 'physx_deformable_volume'],
+        "rigid_chain_targets": [{'node_id': target, 'chain_id': cable_id,
+            'physical_type': 'rigid_joint_chain',
+            'rigid_routing': 'Excluded from CAD mass, collider and rigid grouping before capsule chain authoring',
+            'mass_precedence': 'Explicit linear density times material arc length; no duplicate CAD rigid mass'}
+            for target, cable_id in sorted(deformable_targets.items())
+            if settings['cables'][cable_id].get('representation') == 'rigid_joint_chain'],
+        "body_count": len(actor_groups),
         "dynamic_body_count": len(dynamic_groups),
-        "static_group_count": len(group_records) - len(dynamic_groups),
+        "anchored_root_body_count": int(anchored_group is not None),
+        "movable_body_count": len(dynamic_groups) - int(anchored_group is not None),
+        "articulation": articulation,
+        "couplings": couplings,
+        "kinematic_body_count": len(kinematic_groups),
+        "static_group_count": len(group_records) - len(actor_groups),
+        "optional_properties": optional_records,
         "collider_count": collider_count,
-        "joint_count": sum(item["authored"] for item in joint_records),
+        "joint_count": sum(item["authored"] for item in joint_records) + int(bool(articulation.get("synthetic_world_fixed"))),
+        "ordinary_joint_count": sum(item["authored"] for item in joint_records),
+        "world_fixed_joint_count": int(bool(articulation.get("synthetic_world_fixed"))),
         "groups": group_records,
         "joints": joint_records,
         "fixed_constraints": fixed_records,
         "defaults": defaults,
         "unsupported": unsupported,
         "warnings": warnings,
+        "collision_exclusions": exclusions,
+        "scene": {"prim_path": str(scene.GetPath()), "up_axis": up_axis,
+                  "gravity_direction": [0, -1, 0] if up_axis == "Y" else [0, 0, -1],
+                  "gravity_m_s2": gravity},
         "mass_source": "SCA material or explicit default density times evaluated BREP volume",
         "inertia_source": "OCCT central BREP inertia, rigid rotation and parallel-axis aggregation",
         "component_layout": "Original semantic hierarchy retained and linked to visible physical geometry under sibling body groups",

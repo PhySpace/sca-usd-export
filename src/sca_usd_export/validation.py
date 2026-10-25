@@ -24,11 +24,13 @@ def validate_usd(path, *, expected=None):
         raise ValueError(f"OpenUSD cannot load {path}")
     if not stage.GetDefaultPrim() or str(stage.GetDefaultPrim().GetPath()) != "/Model":
         raise ValueError("USD defaultPrim must be /Model")
-    if (
-        not UsdGeom.StageHasAuthoredMetersPerUnit(stage)
-        or UsdGeom.GetStageMetersPerUnit(stage) != 1.0
-    ):
-        raise ValueError("USD metresPerUnit must be explicitly 1")
+    actual_mpu = expected['configuration'].get('meters_per_unit', 1.0)
+    if not UsdGeom.StageHasAuthoredMetersPerUnit(stage) or UsdGeom.GetStageMetersPerUnit(stage) != actual_mpu:
+        raise ValueError('USD metresPerUnit differs from explicit export configuration')
+    if actual_mpu != 1.0:
+        from .stage_units import stage_in_si
+        stage = stage_in_si(stage, unit_report=expected.get('stage_units'),
+                            geometry_tolerance_m=expected['configuration']['geometry_absolute_tolerance_m'])
     if UsdGeom.GetStageUpAxis(stage) != expected["configuration"]["up_axis"]:
         raise ValueError("USD upAxis differs from configuration")
     if (
@@ -62,10 +64,9 @@ def validate_usd(path, *, expected=None):
                 raise ValueError(f"{prim.GetPath()}: extent differs from actual points")
             all_meshes += 1
             all_triangles += len(counts)
-        if prim.HasAPI(UsdPhysics.CollisionAPI):
+        from .mechanical_properties import applied_schema_tokens
+        if prim.HasAPI(UsdPhysics.CollisionAPI) and "OmniPhysicsVolumeDeformableSimAPI" not in applied_schema_tokens(prim):
             colliders += 1
-            if not UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get():
-                raise ValueError(f"disabled collision shape: {prim.GetPath()}")
         if prim.HasAPI(UsdPhysics.RigidBodyAPI):
             rigid_bodies += 1
             mass = UsdPhysics.MassAPI(prim)
@@ -93,8 +94,27 @@ def validate_usd(path, *, expected=None):
                         raise ValueError(f"joint target does not exist: {target}")
 
     physics_expected = expected["physics"]
+    if "geometry_tolerance_policy" in expected:
+        policy = expected["geometry_tolerance_policy"]
+        saved = {entry["chain_id"]: entry["declaration"]["resolution"]["solver"]["export_geometry_absolute_tolerance_m"]
+                 for entry in physics_expected.get("rigid_chains", [])
+                 if "export_geometry_absolute_tolerance_m" in entry["declaration"].get("resolution", {}).get("solver", {})}
+        if (not isinstance(policy, dict) or policy.get("unit") != "m"
+                or policy.get("value") != tolerance or policy.get("saved_recommendations_m") != saved
+                or policy.get("origin") not in {"explicit_export_configuration", "saved_cable_resolution", "centralized_export_default"}):
+            raise ValueError("Export geometry tolerance policy changed")
+        if policy["origin"] == "saved_cable_resolution" and (not saved or tolerance < max(saved.values())):
+            raise ValueError("Saved export geometry recommendation was not respected")
+    from .physics_validation import validate_physics
+    physics_values = validate_physics(stage, physics_expected, tolerance=tolerance)
+    if physics_expected.get("cables"):
+        from .native_cables import validate_cables
+        physics_values["native_cables"] = validate_cables(stage, physics_expected["cables"], tolerance=tolerance, physics_report=physics_expected)
+    if physics_expected.get('rigid_chains'):
+        from .rigid_chain_validation import validate_rigid_chains
+        physics_values['rigid_chains'] = validate_rigid_chains(stage, physics_expected['rigid_chains'], physics_expected, tolerance=tolerance)
     if (
-        rigid_bodies != physics_expected["dynamic_body_count"]
+        rigid_bodies != physics_expected.get("body_count", physics_expected["dynamic_body_count"])
         or colliders != physics_expected["collider_count"]
         or joints != physics_expected["joint_count"]
     ):
@@ -108,13 +128,22 @@ def validate_usd(path, *, expected=None):
             raise ValueError(f"USD Physics parser found an invalid {kind}")
         parsed_summary[str(kind)] = len(paths)
     mesh_descriptors = parsed.get(UsdPhysics.ObjectType.MeshShape, ([], []))[1]
-    if len(mesh_descriptors) != physics_expected["collider_count"]:
+    chain_shape_count = sum(len(chain['links']) for chain in physics_expected.get('rigid_chains', []))
+    if len(mesh_descriptors) != physics_expected["collider_count"] - chain_shape_count:
         raise ValueError("USD Physics parser collider count differs from report")
+    capsule_descriptors = parsed.get(UsdPhysics.ObjectType.CapsuleShape, ([], []))[1]
+    if len(capsule_descriptors) != chain_shape_count:
+        raise ValueError('USD Physics parser capsule count differs from rigid chain declarations')
 
     for group in physics_expected["groups"]:
         body = stage.GetPrimAtPath(group["body_path"])
-        if not body or body.HasAPI(UsdPhysics.RigidBodyAPI) != group["dynamic"]:
+        mode = group.get("mode", "dynamic" if group["dynamic"] else "static")
+        if not body or body.HasAPI(UsdPhysics.RigidBodyAPI) != (mode != "static"):
             raise ValueError("physics group rigid-body mapping changed")
+        if mode != "static":
+            rigid = UsdPhysics.RigidBodyAPI(body)
+            if not rigid.GetRigidBodyEnabledAttr().Get() or rigid.GetKinematicEnabledAttr().Get() != (mode == "kinematic"):
+                raise ValueError("physics dynamic body enabled/kinematic configuration changed")
         mass = UsdPhysics.MassAPI(body)
         if not mass or not np.isclose(
             mass.GetMassAttr().Get(), group["mass_kg"], rtol=2e-6
@@ -122,7 +151,10 @@ def validate_usd(path, *, expected=None):
             raise ValueError("physics mass changed")
         if not np.allclose(
             mass.GetCenterOfMassAttr().Get(),
-            group["center_of_mass_body_m"],
+            # USD MassAPI fixes centerOfMass to point3f. Compare with the
+            # correctly rounded authored value rather than an unrepresentable
+            # double-precision CAD value; CAD geometry tolerance is unchanged.
+            np.asarray(group["center_of_mass_body_m"], dtype=np.float32),
             rtol=0,
             atol=tolerance,
         ):
@@ -196,6 +228,22 @@ def validate_usd(path, *, expected=None):
             if max_bounds_error > tolerance:
                 raise ValueError(f"mesh bounds changed: {record['node_id']}")
             source_world_points.append(world)
+            rigid_chain = next((chain for chain in physics_expected.get('rigid_chains', []) if chain['target_node_id'] == record['node_id']), None)
+            if rigid_chain is not None:
+                # Original BREP identity/pose is checked above. The replacing
+                # capsule geometry, backlinks and mass are checked independently.
+                continue
+            target = next((cable for cable in physics_expected.get('cables', []) if cable.get('target_node_id') == record['node_id']), None)
+            if target is not None:
+                if UsdGeom.Imageable(prim).ComputeVisibility() != 'invisible':
+                    raise ValueError('CAD deformable semantic source must be hidden; render skin is the sole visible representation')
+                relation = prim.GetRelationship('sca:physicsGeometry')
+                if [str(value) for value in relation.GetTargets()] != [target['simulation_mesh_path']]:
+                    raise ValueError('CAD deformable physics geometry backlink changed')
+                relation = prim.GetRelationship('sca:renderGeometry')
+                if [str(value) for value in relation.GetTargets()] != [target['render_mesh_path']]:
+                    raise ValueError('CAD deformable render geometry backlink changed')
+                continue
             # Physics render/collision shape must occupy exactly the same solved pose.
             shape_rel = prim.GetRelationship(
                 "sca:physicsGeometry"
@@ -237,6 +285,24 @@ def validate_usd(path, *, expected=None):
         bounds, expected["calculated"]["bounds_world_m"], rtol=0, atol=tolerance
     ):
         raise ValueError("world bounds differ from evaluated SCA meshes")
+    scene_bounds = bounds.copy()
+    for cable in physics_expected.get("cables",[]):
+        # The native simulation boundary can extend slightly beyond an actual
+        # CAD display surface after official cooking. Complete physical bounds
+        # include both representations; they need not share vertices/bounds.
+        for mesh_path in {cable['simulation_mesh_path'], cable.get('render_mesh_path',cable['simulation_mesh_path'])}:
+            prim = stage.GetPrimAtPath(mesh_path)
+            points = np.asarray(prim.GetAttribute("points").Get())
+            points = transformed_points(points,np.asarray(cache.GetLocalToWorldTransform(prim)).T)
+            scene_bounds[0] = np.minimum(scene_bounds[0],points.min(axis=0))
+            scene_bounds[1] = np.maximum(scene_bounds[1],points.max(axis=0))
+    for chain in physics_expected.get('rigid_chains', []):
+        # validate_rigid_chains already recomputed these bounds from the reopened
+        # Capsule dimensions and poses, rather than trusting a points-only mesh.
+        scene_bounds[0] = np.minimum(scene_bounds[0], chain['bounds_world_m'][0])
+        scene_bounds[1] = np.maximum(scene_bounds[1], chain['bounds_world_m'][1])
+    if "scene_bounds_world_m" in expected["calculated"] and not np.allclose(scene_bounds,expected["calculated"]["scene_bounds_world_m"],rtol=0,atol=tolerance):
+        raise ValueError("complete scene bounds differ from CAD and native cable geometry")
     if semantic_triangle_count != expected["calculated"]["triangle_count"]:
         raise ValueError("triangle count differs from SCA tessellation")
     history_attr = stage.GetDefaultPrim().GetAttribute("sca:history").Get()
@@ -244,9 +310,10 @@ def validate_usd(path, *, expected=None):
     return dict(
         ok=True,
         physics_static_ok=True,
+        physics_values=physics_values,
         simulator_validated=False,
         default_prim="/Model",
-        metres_per_unit=1.0,
+        metres_per_unit=actual_mpu,
         kilograms_per_unit=1.0,
         up_axis=str(UsdGeom.GetStageUpAxis(stage)),
         semantic_occurrence_count=len(expected["occurrences"]),
@@ -262,5 +329,8 @@ def validate_usd(path, *, expected=None):
         max_bounds_error_m=max_bounds_error,
         bounds_world_m=bounds.tolist(),
         dimensions_m=(bounds[1] - bounds[0]).tolist(),
+        cad_bounds_world_m=bounds.tolist(),
+        scene_bounds_world_m=scene_bounds.tolist(),
+        scene_dimensions_m=(scene_bounds[1]-scene_bounds[0]).tolist(),
         history_definition_count=len(history["definitions"]),
     )

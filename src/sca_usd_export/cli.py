@@ -2,6 +2,7 @@
 
 import argparse
 import json
+from pathlib import Path
 import sys
 
 from .config import ExportConfig
@@ -18,6 +19,8 @@ def main(argv=None):
     )
     export.add_argument("input", help="input .scadpkg")
     export.add_argument("output", help="new .usda output; existing paths are refused")
+    export.add_argument('--expected-input-sha256', help='require the exact selected final package bytes')
+    export.add_argument('--require-physics', action='store_true', help='refuse a raw package without saved sca_physics')
     export.add_argument(
         "--config", help="JSON configuration overriding centralized defaults"
     )
@@ -26,6 +29,11 @@ def main(argv=None):
         choices=("Y", "Z"),
         help="label CAD up axis; do not rotate coordinates",
     )
+    prepare = commands.add_parser('prepare-deformable', help='write selected CAD occurrence closed surface in world SI metres for official cooking')
+    prepare.add_argument('input', help='existing .scadpkg; no flexible declaration is needed yet')
+    prepare.add_argument('target', help='exact stable CAD part occurrence node_id')
+    prepare.add_argument('output', help='new surface JSON path')
+    prepare.add_argument('--config', help='same tessellation config to use for subsequent USD export')
     validate = commands.add_parser(
         "validate", help="reopen USD and compare with its export report"
     )
@@ -47,15 +55,17 @@ def main(argv=None):
 
             result = runtime_facts()
         elif args.command == "export":
-            from dataclasses import replace
             from .exporter import export_package
 
             config = (
                 ExportConfig.from_json(args.config) if args.config else ExportConfig()
             )
-            if args.up_axis:
-                config = replace(config, up_axis=args.up_axis)
-            report = export_package(args.input, args.output, config=config)
+            explicit_fields = json.loads(Path(args.config).read_text(encoding="utf-8")).keys() if args.config else ()
+            report = export_package(args.input, args.output, config=config,
+                                    up_axis_override=args.up_axis,
+                                    explicit_config_fields=explicit_fields,
+                                    expected_input_sha256=args.expected_input_sha256,
+                                    require_physics=args.require_physics)
             result = {
                 key: report[key]
                 for key in ("output", "history", "status", "validation")
@@ -64,6 +74,10 @@ def main(argv=None):
             from .validation import validate_usd
 
             result = validate_usd(args.input)
+        elif args.command == 'prepare-deformable':
+            from .deformable_targets import write_deformable_surface
+            config = ExportConfig.from_json(args.config) if args.config else ExportConfig()
+            result = write_deformable_surface(args.input, args.target, args.output, config=config)
         elif args.command == "preview":
             from .preview import write_preview
 

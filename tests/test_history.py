@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,23 @@ from sca_usd_export.history import (
     read_history_bundle,
     write_history_bundle,
 )
+
+
+def client_native_path(path):
+    """Independent test-side Win32 I/O, not the writer's private helper.
+
+    Keep all byte assertions and deliberate mutations even when pytest's
+    result directory plus a content digest exceeds legacy MAX_PATH.
+    """
+    path = Path(path).absolute()
+    if os.name != 'nt':
+        return path
+    text = str(path)
+    if text.startswith('\\\\?\\'):
+        return path
+    if text.startswith('\\\\'):
+        return Path('\\\\?\\UNC\\' + text[2:])
+    return Path('\\\\?\\' + text)
 
 
 @pytest.fixture
@@ -34,10 +52,10 @@ def test_preserves_exact_graph_and_source_bytes(tmp_path, part_definition):
     record = manifest["definitions"][0]
     original = part_definition.blobs[part_definition.feature_graph_ref.path]
     assert (
-        manifest_path.parent / record["feature_graph"]["path"]
+        client_native_path(manifest_path.parent / record["feature_graph"]["path"])
     ).read_bytes() == original
     assert (
-        manifest_path.parent / record["definition"]["path"]
+        client_native_path(manifest_path.parent / record["definition"]["path"])
     ).read_bytes() == part_definition.canonical_bytes
     artifact = read_feature_graph(manifest_path, "history-box")
     assert artifact.source_files
@@ -79,7 +97,7 @@ def test_preserves_instances_transforms_and_definition_reuse(tmp_path, part_defi
         for item in manifest["definitions"]
         if item["definition_id"] == "history-assembly"
     )
-    raw = json.loads((manifest_path.parent / record["definition"]["path"]).read_bytes())
+    raw = json.loads(client_native_path(manifest_path.parent / record["definition"]["path"]).read_bytes())
     assert raw == definition.to_dict()
     assert [item["instance_id"] for item in raw["instances"]] == ["first", "second"]
     assert {item["definition_id"] for item in raw["instances"]} == {"history-box"}
@@ -89,7 +107,7 @@ def test_preserves_instances_transforms_and_definition_reuse(tmp_path, part_defi
 def test_detects_corrupt_resource(tmp_path, part_definition):
     manifest_path = write_history_bundle(part_definition, tmp_path / "box.history")
     manifest = read_history_bundle(manifest_path)
-    resource = (
+    resource = client_native_path(
         manifest_path.parent / manifest["definitions"][0]["feature_graph"]["path"]
     )
     resource.write_bytes(resource.read_bytes() + b"tampered")
@@ -111,3 +129,18 @@ def test_unknown_definition_is_clear(tmp_path, part_definition):
     manifest_path = write_history_bundle(part_definition, tmp_path / "box.history")
     with pytest.raises(KeyError, match="absent"):
         read_feature_graph(manifest_path, "missing")
+
+
+def test_long_windows_history_paths_remain_portable(tmp_path, part_definition):
+    destination = tmp_path
+    while len(str(destination)) < 280:
+        destination = destination / ("material-" * 6)
+    destination = destination / "long.history"
+    assert len(str(destination)) > 260
+    path = write_history_bundle(part_definition, destination)
+    manifest = read_history_bundle(path)
+    assert manifest["definitions"][0]["definition"]["path"].startswith("definitions/")
+    assert "\\" not in manifest["definitions"][0]["definition"]["path"]
+    assert read_feature_graph(path, "history-box").owner_definition_id == "history-box"
+    with pytest.raises(FileExistsError):
+        write_history_bundle(part_definition, destination)

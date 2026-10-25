@@ -9,8 +9,10 @@ from pathlib import Path
 @dataclass(frozen=True)
 class ExportConfig:
     # CAD coordinates remain unchanged in direction. This only labels USD up.
-    # Y is verified for the supplied u_link dimensions.py; other assets may use Z.
-    up_axis: str = "Y"
+    # SCA's default scene uses +Z. Embedded package physics takes precedence.
+    up_axis: str = "Z"
+    # Explicit output units. CAD and the plugin's stored declarations stay SI.
+    meters_per_unit: float = 1.0
     linear_deflection_mm: float = 0.1
     angular_deflection_degrees: float = 20.0
     relative_deflection: bool = False
@@ -19,13 +21,16 @@ class ExportConfig:
     dynamic_collision_approximation: str = "convexHull"
     static_collision_approximation: str = "none"
     default_friction: float = 0.5
-    default_restitution: float = 0.0
+    default_dynamic_friction: float = 0.4
+    default_restitution: float = 0.1
     gravity_m_s2: float = 9.81
     joint_collision_enabled: bool = False
     joint_limit_policy: str = "unbounded"
     geometry_absolute_tolerance_m: float = 1e-8
 
     def __post_init__(self):
+        if isinstance(self.meters_per_unit, bool) or self.meters_per_unit not in (1.0, 0.01):
+            raise ValueError('meters_per_unit must be 1.0 (legacy metres) or 0.01 (centimetres)')
         if self.up_axis not in ("Y", "Z"):
             raise ValueError("up_axis must be Y or Z; coordinates are not rotated")
         for name in (
@@ -47,7 +52,7 @@ class ExportConfig:
         for name in ("relative_deflection", "joint_collision_enabled"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be bool")
-        for name in ("default_friction", "default_restitution", "gravity_m_s2"):
+        for name in ("default_friction", "default_dynamic_friction", "default_restitution", "gravity_m_s2"):
             value = getattr(self, name)
             if (
                 isinstance(value, bool)

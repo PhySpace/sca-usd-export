@@ -36,6 +36,10 @@ def runtime_facts(expected_runtime=None):
         "plotly": "plotly",
         "sca-usd-export": "sca_usd_export",
     }
+    if importlib.util.find_spec("sca_physics") is not None:
+        from .dependencies import require_physics
+        require_physics()
+        distributions["sca-physics"] = "sca_physics"
     versions, origins = {}, {}
     for distribution, module in distributions.items():
         versions[distribution] = importlib.metadata.version(distribution)
@@ -43,8 +47,8 @@ def runtime_facts(expected_runtime=None):
         if spec is None or spec.origin is None or not _under(spec.origin, prefix):
             raise ValueError(f"{module} must be installed inside the add-on environment")
         origins[module] = str(Path(spec.origin).resolve())
-    if versions["simplecadapi"] != "2.2.4":
-        raise ValueError("this release was verified against SimpleCADAPI 2.2.4")
+    if versions["simplecadapi"] != "2.2.5":
+        raise ValueError("this release requires the tested SimpleCADAPI 2.2.5")
     if versions["usd-core"] != "26.8":
         raise ValueError("this release requires usd-core 26.8")
     if versions["cadquery-ocp"] != "7.9.3.1":
@@ -65,4 +69,5 @@ def runtime_facts(expected_runtime=None):
         "no_system_site_packages": True,
         "isolated_mode": bool(sys.flags.isolated),
         "bytecode_disabled": bool(sys.dont_write_bytecode),
+        "physics_extension_available": "sca-physics" in versions,
     }

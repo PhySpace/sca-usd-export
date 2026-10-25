@@ -18,6 +18,25 @@ from sca_usd_export.model import transformed_points
 from sca_usd_export.validation import validate_usd
 
 
+def test_center_of_mass_uses_usd_float32_rounding(tmp_path):
+    @scad.part(id="usd-float32-com")
+    def box():
+        return scad.make_box_rsolid(width=16.0, height=8.0, depth=8.0,
+                                   bottom_face_center=(258.0, 0.0, 0.0))
+
+    package = scad.build_product_package(box())
+    output = tmp_path / "float-com.usda"
+    report = export_package(package, output)
+    analytical = np.asarray(report["physics"]["groups"][0]["center_of_mass_body_m"])
+    assert analytical[0] == pytest.approx(.258)
+    stage = Usd.Stage.Open(str(output))
+    actor = stage.GetPrimAtPath(report["physics"]["groups"][0]["body_path"])
+    actual = np.asarray(UsdPhysics.MassAPI(actor).GetCenterOfMassAttr().Get())
+    assert np.array_equal(actual, analytical.astype(np.float32))
+    assert abs(actual[0] - analytical[0]) > report["configuration"]["geometry_absolute_tolerance_m"]
+    assert validate_usd(output)["ok"]
+
+
 @pytest.fixture(scope="module")
 def nested_package():
     @scad.part(id="usd-test-pin")

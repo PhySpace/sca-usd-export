@@ -18,3 +18,7 @@ match the original exporter's kernel baseline; it is not bundled here.
 
 OpenUSD and other third-party dependencies retain their respective
 licenses and notices. This add-on does not include or validate Isaac Sim.
+
+The maintained 0.1.6rc1 candidate adds package-declared rigid capsule/D6 chains,
+SI stage-unit conversion and independent reopened-chain checks. These local
+changes do not modify upstream licensing or include a physics solver.

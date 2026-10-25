@@ -24,13 +24,13 @@ try {
     }
     else {
         if (-not $ScaCommand) { $ScaCommand = 'sca' }
-        $resolvedCommand = Get-Command $ScaCommand -CommandType Application -ErrorAction Stop
+        $resolvedCommand = Get-Command $ScaCommand -CommandType Application -ErrorAction Stop | Select-Object -First 1
         $executable = $resolvedCommand.Source
         if ([System.IO.Path]::GetExtension($executable) -ieq '.cmd') {
             # SCA init writes a shim. Read its literal target; never execute a
             # shell script or reconstruct a command from its unrestricted text.
             $targets = @(Get-Content -LiteralPath $executable | ForEach-Object {
-                if ($_ -match '^\s*"([^"\r\n]+\.exe)"\s+%\*\s*$') { $Matches[1] }
+                if ($_ -match '^\s*@?"([^"\r\n]+\.exe)"\s+%\*\s*$') { $Matches[1] }
             })
             if ($targets.Count -ne 1 -or [System.IO.Path]::GetFileName($targets[0]) -ine 'sca.exe' -or -not (Test-Path -LiteralPath $targets[0] -PathType Leaf)) {
                 throw 'This .cmd file is not a recognized SCA init shim. Pass the SCA host interpreter with -ScaPython, or an actual sca.exe with -ScaCommand.'

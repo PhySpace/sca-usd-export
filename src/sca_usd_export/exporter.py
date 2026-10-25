@@ -1,7 +1,9 @@
 """SCA package -> local definition meshes, semantic instances and USD Physics."""
 
 import importlib.metadata
+import hashlib
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -52,16 +54,53 @@ def _identity(prim, source, Sdf):
     prim.SetDisplayName(source["display_name"])
 
 
-def export_package(data, output_path, *, config=None):
+def _geometry_tolerance_policy(package, config, explicit_fields):
+    """Use only a validated, saved export recommendation; never infer physics."""
+    recommendations = {}
+    embedded = package.root_definition.metadata.get("sca_physics")
+    for identity, item in (embedded or {}).get("cables", {}).items():
+        resolution = item.get("resolution", {})
+        solver = resolution.get("solver", {}) if isinstance(resolution, dict) else {}
+        if "export_geometry_absolute_tolerance_m" in solver:
+            suggestion = solver["export_geometry_absolute_tolerance_m"]
+            if isinstance(suggestion, bool) or not isinstance(suggestion, (float, int)) or not math.isfinite(suggestion) or suggestion <= 0:
+                raise ValueError("Saved export geometry tolerance must be positive and finite")
+            recommendations[identity] = float(suggestion)
+    if recommendations:
+        from .dependencies import require_physics
+        require_physics()
+        from sca_physics.contract import validate_config
+        validate_config(package, embedded)
+    explicit = "geometry_absolute_tolerance_m" in explicit_fields
+    selected = config.geometry_absolute_tolerance_m
+    if recommendations and not explicit:
+        selected = max(selected, *recommendations.values())
+    return {"value": selected, "unit": "m", "origin": (
+                "explicit_export_configuration" if explicit else
+                "saved_cable_resolution" if recommendations else "centralized_export_default"),
+            "configured_value_before_saved_recommendation_m": config.geometry_absolute_tolerance_m,
+            "saved_recommendations_m": recommendations,
+            "purpose": "CAD Mesh float32 geometric rounding guard only; no change to material or native mechanics acceptance"}
+
+
+def export_package(data, output_path, *, config=None, up_axis_override=None, explicit_config_fields=None,
+                   expected_input_sha256=None, require_physics=False):
     """Export one validated ProductPackage (or .scadpkg path) to a new .usda.
 
     Output paths are never overwritten. All coordinates are authored in metres,
     retaining CAD axis directions and the materialized, solved local transforms.
     The semantic product tree and physics grouping are linked explicitly.
     """
+    supplied_config = config is not None
     config = config or ExportConfig()
     if not isinstance(config, ExportConfig):
         raise ValueError("config must be ExportConfig")
+    # CLI supplies exact JSON keys (including an empty set). For tolerance only,
+    # a direct API config object gets conservative precedence, even for a value
+    # deliberately equal to the default. Existing physics override rules retain
+    # their previous nondefault-field detection and are not widened here.
+    tolerance_explicit_fields = ({"geometry_absolute_tolerance_m"} if supplied_config else set()) if explicit_config_fields is None else set(explicit_config_fields)
+    explicit_config_fields = set(explicit_config_fields or ())
     destination = Path(output_path).expanduser().resolve()
     if destination.suffix.lower() != ".usda":
         raise ValueError("output must end in .usda")
@@ -78,6 +117,19 @@ def export_package(data, output_path, *, config=None):
             raise ValueError("input must end in .scadpkg")
     else:
         input_path = None
+    # Decode exactly the bytes whose identity was checked. In particular, do not
+    # validate one file and let the reader reopen another same-named revision.
+    if input_path is not None:
+        data = input_path.read_bytes()
+    input_sha256 = hashlib.sha256(data).hexdigest() if isinstance(data, (bytes, bytearray, memoryview)) else None
+    if expected_input_sha256 is not None:
+        if (not isinstance(expected_input_sha256, str) or len(expected_input_sha256) != 64
+                or any(c not in '0123456789abcdefABCDEF' for c in expected_input_sha256)):
+            raise ValueError('expected_input_sha256 must be a 64-character SHA256 hex digest')
+        if input_sha256 is None or input_sha256 != expected_input_sha256.lower():
+            raise ValueError('Input package SHA256 differs from the selected final package; no export written')
+    if type(require_physics) is not bool:
+        raise ValueError('require_physics must be boolean')
     Gf, Sdf, Usd, UsdGeom, UsdPhysics, Vt = require_usd()
     from simplecadapi.translator.package_units import (
         read_product_package_translation_units,
@@ -86,9 +138,38 @@ def export_package(data, output_path, *, config=None):
     from .validation import validate_usd
 
     package, units = read_product_package_translation_units(data)
+    embedded = package.root_definition.metadata.get('sca_physics')
+    if require_physics and embedded is None:
+        raise ValueError('Selected final package has no metadata.sca_physics; refusing raw CAD export')
+    physics_sha256 = hashlib.sha256(json.dumps(embedded, sort_keys=True, separators=(',', ':'),
+        ensure_ascii=False, allow_nan=False, default=_json_default).encode('utf-8')).hexdigest() if embedded is not None else None
     if any(unit.definition.units != "mm" for unit in units):
         raise ValueError("this extension requires SCA canonical millimetre definitions")
+    from dataclasses import replace
+    geometry_tolerance = _geometry_tolerance_policy(package, config, tolerance_explicit_fields)
+    config = replace(config, geometry_absolute_tolerance_m=geometry_tolerance["value"])
     records, meshes = collect_model(package, config)
+    from .embedded_physics import package_settings
+    nondefault_physics = {field for field in (
+        "up_axis", "default_friction", "default_dynamic_friction", "default_restitution",
+        "dynamic_collision_approximation", "static_collision_approximation", "joint_collision_enabled"
+    ) if getattr(config, field) != getattr(ExportConfig(), field)}
+    physics_settings, physics_input = package_settings(
+        package, records, config, up_axis_override=up_axis_override,
+        explicit_config_fields=set(explicit_config_fields) | nondefault_physics,
+    )
+    config = replace(config, up_axis=physics_settings["scene"]["up_axis"]["value"][1:])
+    from .rigid_joint_chain import chain_declarations, scene_settings
+    rigid_chains = chain_declarations(physics_settings)
+    fem_cables = {key: item for key, item in physics_settings.get('cables', {}).items()
+                 if item.get('representation') == 'physx_deformable_volume'}
+    unknown = {item.get('representation') for item in physics_settings.get('cables', {}).values()} - {'physx_deformable_volume', 'rigid_joint_chain'}
+    if unknown:
+        raise ValueError(f'Unsupported cable representation: {sorted(map(str, unknown))}')
+    if rigid_chains and fem_cables:
+        raise ValueError('CPU rigid_joint_chain and GPU native FEM scene policies conflict; export separate scenes explicitly')
+    if rigid_chains:
+        config = replace(config, gravity_m_s2=scene_settings(rigid_chains)['gravity_magnitude'])
 
     stage = Usd.Stage.CreateInMemory()
     root = UsdGeom.Xform.Define(stage, "/Model").GetPrim()
@@ -180,7 +261,28 @@ def export_package(data, output_path, *, config=None):
             world_points.append(points_world)
         expected_occurrences.append(expected)
 
-    physics_report = apply_physics(stage, records, package.occurrence_graph, config)
+    physics_report = apply_physics(stage, records, package.occurrence_graph, config, physics_settings)
+    if fem_cables:
+        from .native_cables import author_cables
+        physics_report["cables"] = author_cables(stage, fem_cables, records, physics_report,
+                                                 package=package, meshes=meshes, config=config)
+        scene_prim = stage.GetPrimAtPath(physics_report["scene"]["prim_path"])
+        scene_prim.AddAppliedSchema("PhysxSceneAPI")
+        for name, kind, value in (("enableGPUDynamics", "Bool", True), ("broadphaseType", "Token", "GPU"), ("solverType", "Token", "TGS"), ("timeStepsPerSecond", "UInt", 480)):
+            scene_prim.CreateAttribute("physxScene:" + name, getattr(Sdf.ValueTypeNames, kind), custom=False).Set(value)
+        physics_report["native_deformable_requirements"] = {
+            "backend": "Omni PhysX 107.3.18", "gpu_dynamics": True,
+            "runtime_setting": "/persistent/physics/enableDeformableBeta", "runtime_value": True,
+            "setting_scope": "Simulator session; exporter does not alter persistent settings",
+            "material_semantics": "Native finite-element density, Young modulus and Poisson ratio; no joint surrogate",
+            "time_steps_per_second": {"value":480,"unit":"Hz","usd_attribute":"physxScene:timeStepsPerSecond","usd_type":"uint",
+                "schema_fallback":60,"source":{"kind":"default","detail":"Case-specific stable-step assumption: actual native cable acceptance and viewer use 1/480 s; no timestep convergence calibration has been performed"}},
+        }
+    if rigid_chains:
+        from .rigid_joint_chain import author_rigid_joint_chains
+        physics_report['rigid_chains'] = author_rigid_joint_chains(stage, rigid_chains, records, physics_report)
+    physics_report["input_configuration"] = physics_input
+    physics_report["warnings"].extend(physics_input["warnings"])
     # Assets live under defaultPrim so referencing the default asset includes physics.
     history_relative = history_dir.name + "/history.json"
     root.CreateAttribute("sca:history", Sdf.ValueTypeNames.Asset).Set(
@@ -197,9 +299,15 @@ def export_package(data, output_path, *, config=None):
     )
     combined = np.concatenate(world_points)
     bounds_world = np.array([combined.min(axis=0), combined.max(axis=0)])
+    cable_bounds = [np.asarray(cable["bounds_world_m"]) for cable in physics_report.get("cables",[]) + physics_report.get('rigid_chains', [])]
+    scene_bounds_world = np.asarray([np.vstack([bounds_world[0]]+[bounds[0] for bounds in cable_bounds]).min(axis=0),
+                                     np.vstack([bounds_world[1]]+[bounds[1] for bounds in cable_bounds]).max(axis=0)])
     report = dict(
         schema_version="1.0",
         input=str(input_path) if input_path else "in-memory ProductPackage",
+        input_package_sha256=input_sha256,
+        physics_metadata_sha256=physics_sha256,
+        input_require_physics=require_physics,
         output=str(destination),
         history=history_relative,
         versions={
@@ -207,6 +315,7 @@ def export_package(data, output_path, *, config=None):
             for name in ("simplecadapi", "usd-core", "numpy")
         },
         configuration=config.to_dict(),
+        geometry_tolerance_policy=geometry_tolerance,
         from_sca=dict(
             root_definition_id=package.root_id,
             package_content_hash=package.content_hash,
@@ -220,6 +329,11 @@ def export_package(data, output_path, *, config=None):
             length_conversion="SCA mm -> USD m; vertices and local translations each converted once",
             bounds_world_m=bounds_world,
             dimensions_m=bounds_world[1] - bounds_world[0],
+            bounds_world_scope="SCA CAD geometry only; preserved legacy field. Complete initial asset bounds are scene_bounds_world_m.",
+            cad_bounds_world_m=bounds_world,
+            cad_dimensions_m=bounds_world[1]-bounds_world[0],
+            scene_bounds_world_m=scene_bounds_world,
+            scene_dimensions_m=scene_bounds_world[1]-scene_bounds_world[0],
             part_occurrence_count=len(world_points),
             unique_part_definition_count=len(meshes),
             triangle_count=sum(
@@ -235,7 +349,7 @@ def export_package(data, output_path, *, config=None):
                 component="stage",
                 value=config.up_axis,
                 unit="axis",
-                reason="SCA canonical definitions have no global up-axis field; preserve CAD axes and label the configured up axis. The supplied dimensions.py explicitly uses +Y upward.",
+                reason="Resolved package sca_physics scene.up_axis, explicit CLI override, or traced legacy +Z policy. Labels USD upAxis and sets gravity; geometry coordinates remain unchanged.",
             ),
             dict(
                 field="linear_deflection_mm",
@@ -274,6 +388,8 @@ def export_package(data, output_path, *, config=None):
             simulator_validated=False,
         ),
     )
+    if input_path is not None and hashlib.sha256(input_path.read_bytes()).hexdigest() != input_sha256:
+        raise ValueError('Input package changed during export; no output written')
     destination.parent.mkdir(parents=True, exist_ok=True)
     history_path = write_history_bundle(
         package.root_definition, history_dir, package_content_hash=package.content_hash
@@ -441,6 +557,8 @@ def export_package(data, output_path, *, config=None):
             "Input contains no explicit revolute or prismatic joint; none inferred",
         )
     report["data_provenance"] = provenance
+    from .stage_units import convert_stage_units
+    report['stage_units'] = convert_stage_units(stage, config.meters_per_unit)
     stage.GetRootLayer().Export(str(destination))
     report["status"]["file_written"] = destination.is_file()
     # Reopen the exported file, not the in-memory stage, and compare with SCA geometry.

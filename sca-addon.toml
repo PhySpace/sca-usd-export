@@ -1,11 +1,11 @@
 [addon]
 name = "sca-usd-export"
-version = "0.1.0"
+version = "0.1.8rc2"
 license = "Apache-2.0"
 skill_path = "skill"
 
 [compat]
-sca = ">=2.2.4,<2.2.5"
+sca = ">=2.2.5,<2.2.6"
 
 [runtime]
 kind = "python-env"

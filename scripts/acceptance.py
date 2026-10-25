@@ -20,6 +20,8 @@ def main():
     parser.add_argument("--sca-python", required=True, type=Path)
     parser.add_argument("--bootstrap-python", required=True, type=Path)
     parser.add_argument("--package", required=True, type=Path)
+    parser.add_argument("--physics-source", type=Path,
+                        help="matching sca-physics repository or wheel; alternatively set SCA_PHYSICS_SOURCE")
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--resume", action="store_true", help="resume this script's own failed work directory after an add-on fix")
     args = parser.parse_args()
@@ -65,6 +67,13 @@ def main():
     env.pop("PYTHONPATH", None)
     env.pop("SCA_ADDON_HOME", None)
     env.pop("SCA_SKILLS_DIR", None)
+    physics_source = args.physics_source or (Path(env["SCA_PHYSICS_SOURCE"]) if env.get("SCA_PHYSICS_SOURCE") else None)
+    if physics_source is not None:
+        if not physics_source.resolve().exists():
+            raise ValueError("--physics-source / SCA_PHYSICS_SOURCE does not exist")
+        env["SCA_PHYSICS_SOURCE"] = str(physics_source.resolve())
+    else:
+        env.pop("SCA_PHYSICS_SOURCE", None)
     host = [str(args.sca_python.resolve()), "-I", "-B", "-m", "simplecadapi.cli"]
     management_python = args.sca_python.resolve()
     results = list(previous)
@@ -80,7 +89,7 @@ def main():
             "host_cli_python": str(args.sca_python.resolve()),
             "bootstrap_python": str(args.bootstrap_python.resolve()),
             "environment_overrides": {key: env[key] for key in (
-                "USERPROFILE", "SCA_USD_BOOTSTRAP_PYTHON", "PYTHONDONTWRITEBYTECODE", "PIP_FIND_LINKS", "SCA_USD_WHEELHOUSE")
+                "USERPROFILE", "SCA_USD_BOOTSTRAP_PYTHON", "SCA_PHYSICS_SOURCE", "PYTHONDONTWRITEBYTECODE", "PIP_FIND_LINKS", "SCA_USD_WHEELHOUSE")
                 if key in env},
             "steps": results, "github_install_tested": False,
             "isaac_sim_tested": False, "ok": overall_ok,
